@@ -22,6 +22,10 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 
+from scipy.spatial.transform import Rotation as R
+from transforms3d.quaternions import mat2quat, quat2mat
+from sklearn.mixture import GaussianMixture
+
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
 except:
@@ -154,7 +158,7 @@ class GaussianModel:
         features[:, :3, 0 ] = fused_color
         features[:, 3:, 1:] = 0.0
 
-        print("Number of points at initialisation : ", fused_point_cloud.shape[0])
+        # print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
@@ -163,12 +167,12 @@ class GaussianModel:
 
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
-        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
-        self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
-        self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
-        self._scaling = nn.Parameter(scales.requires_grad_(True))
-        self._rotation = nn.Parameter(rots.requires_grad_(True))
-        self._opacity = nn.Parameter(opacities.requires_grad_(True))
+        # self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        # self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        # self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        # self._scaling = nn.Parameter(scales.requires_grad_(True))
+        # self._rotation = nn.Parameter(rots.requires_grad_(True))
+        # self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}
         self.pretrained_exposures = None
@@ -182,9 +186,9 @@ class GaussianModel:
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
-            {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
-            {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
-            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+            {'params': [self._features_dc], 'lr': 0, "name": "f_dc"},
+            {'params': [self._features_rest], 'lr': 0, "name": "f_rest"},
+            {'params': [self._opacity], 'lr': 0, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
@@ -239,13 +243,17 @@ class GaussianModel:
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
 
-        xyz = self._xyz.detach().cpu().numpy()
+        xyz, scale, rotation, opacities, features, f_dc, f_rest = self.deparameterize_segments(self._xyz)
+
+        print(f"Saving {xyz.shape[0]} points to {path}")
+
+        xyz = xyz.data.cpu().numpy()
         normals = np.zeros_like(xyz)
-        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        opacities = self._opacity.detach().cpu().numpy()
-        scale = self._scaling.detach().cpu().numpy()
-        rotation = self._rotation.detach().cpu().numpy()
+        f_dc = f_dc.data.transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        f_rest = f_rest.data.transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        opacities = opacities.data.cpu().numpy()
+        scale = scale.data.cpu().numpy()
+        rotation = rotation.data.cpu().numpy()
 
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
@@ -254,6 +262,58 @@ class GaussianModel:
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
+
+    def save_compressed_ply(self, path):
+        mkdir_p(os.path.dirname(path))
+
+        print(f"Saving {self.get_xyz.shape[0]} points as a compressed ply to {path}")
+
+        xyz, f_dc, f_rest, opacities, scale, rotation = [], [], [], [], [], []
+        b_xyz, b_scale, b_rotation = [], [], []
+        segments = []
+
+        for i in range(self.no_prototypes):
+
+            # describe small gaussians
+            xyz += self._proto_dict[i]["xyz"].tolist()
+            f_dc += self._proto_dict[i]["features_dc"].tolist()
+            f_rest += self._proto_dict[i]["features_rest"].tolist()
+            opacities += self._proto_dict[i]["opacity"].tolist()
+            scale += self._proto_dict[i]["scaling"].tolist()
+            rotation += self._proto_dict[i]["rotation"].tolist()
+            segments += [i] * self._proto_dict[i]["xyz"].shape[0]
+
+        for i in range(self._xyz.shape[0]):
+
+            b_xyz.append(self._xyz[i].tolist())
+            b_scale.append(self._scaling[i].tolist())
+            b_rotation.append(self._rotation[i].tolist())
+
+        xyz, opacities, scale, rotation, segments = np.array(xyz), np.array(opacities), np.array(scale), np.array(rotation), np.array(segments)
+        b_xyz, b_scale, b_rotation = np.array(b_xyz), np.array(b_scale), np.array(b_rotation)
+        segments = segments.reshape(-1, 1)
+
+        normals = np.zeros_like(xyz)
+
+        f_dc = torch.tensor(f_dc, dtype=torch.float).transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        f_rest = torch.tensor(f_rest, dtype=torch.float).transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+
+        # save small gaussians
+        dtype_full = [ (attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+        dtype_full += [("segment", 'f4')]
+        elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, segments), axis=1)
+        elements[:] = list(map(tuple, attributes))
+        vertex_el = PlyElement.describe(elements, 'vertex')
+
+        # save big gaussians
+        dtype_full = [ ("x", "f4"), ("y", "f4"), ("z", "f4"), ("scale_0", "f4"), ("scale_1", "f4"), ("scale_2", "f4"), ("rot_0", "f4"), ("rot_1", "f4"), ("rot_2", "f4"), ("rot_3", "f4")]
+        elements = np.empty(len(b_xyz), dtype=dtype_full)
+        attributes = np.concatenate((b_xyz, b_scale, b_rotation), axis=1)
+        elements[:] = list(map(tuple, attributes))
+        segment_el = PlyElement.describe(elements, 'segment')
+        
+        PlyData([vertex_el, segment_el]).write(path)
 
     def reset_opacity(self):
         opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
@@ -312,6 +372,371 @@ class GaussianModel:
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
         self.active_sh_degree = self.max_sh_degree
+
+    def gaussian_mixture(self, positions):
+        gmm = GaussianMixture(1, covariance_type='full', random_state=42)
+        gmm.fit(positions)
+
+        # Extract parameters
+
+        mean = gmm.means_[0]
+        covariance = gmm.covariances_[0]
+
+        eigenvalues, eigenvectors = np.linalg.eig(covariance)
+        sort_indices = np.argsort(eigenvalues)[::-1]
+        eigenvalues = eigenvalues[sort_indices]
+        eigenvectors = eigenvectors[:, sort_indices]
+
+        scale = np.sqrt(eigenvalues)
+        rot = eigenvectors
+
+        quats = GaussianModel.quat_from_matrix(torch.tensor(rot[None], dtype=torch.float, device="cuda")).cpu().numpy()
+        quats = quats[0]
+
+        return mean, scale, quats
+
+    def load_prototypes(self, segment_paths, segment_counts):
+
+        self.no_prototypes = len(segment_counts)
+
+        seg_xyz = []
+        seg_features_dc = []
+        seg_features_rest = []
+        seg_opacities = []
+        seg_scales = []
+        seg_rots = []
+        seg_segs = []
+
+        proto_dictionaries = [None] * self.no_prototypes
+
+        for i, (path, count) in enumerate(zip(segment_paths, segment_counts)):
+
+            plydata = PlyData.read(path)
+
+            xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
+                            np.asarray(plydata.elements[0]["y"]),
+                            np.asarray(plydata.elements[0]["z"])),  axis=1)
+            opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+
+            features_dc = np.zeros((xyz.shape[0], 3, 1))
+            features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
+            features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
+            features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
+
+            extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
+            extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
+            assert len(extra_f_names)==3*(self.max_sh_degree + 1) ** 2 - 3
+            features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
+            for idx, attr_name in enumerate(extra_f_names):
+                features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
+            # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
+            features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
+
+            scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
+            scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
+            scales = np.zeros((xyz.shape[0], len(scale_names)))
+            for idx, attr_name in enumerate(scale_names):
+                scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+            rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
+            rot_names = sorted(rot_names, key = lambda x: int(x.split('_')[-1]))
+            rots = np.zeros((xyz.shape[0], len(rot_names)))
+            for idx, attr_name in enumerate(rot_names):
+                rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+            #append count times
+            proto_dictionaries[i] = {
+                "xyz": xyz,
+                "features_dc": features_dc,
+                "features_rest": features_extra,
+                "opacity": opacities,
+                "scaling": scales,
+                "rotation": rots,
+            }
+
+            self._proto_dict = proto_dictionaries
+
+            # ------------------------------------------
+            # Prepare big gaussian from gaussian Mixture
+            big_m, big_s, big_r = self.gaussian_mixture(xyz)
+
+            opacities = np.asarray(np.zeros((1, 1)))[..., np.newaxis]
+
+            features_dc = np.zeros((3, 1))
+            features_extra = np.zeros((3*(self.max_sh_degree + 1) ** 2 - 3))
+            features_extra = features_extra.reshape((3, (self.max_sh_degree + 1) ** 2 - 1))
+            
+            for _ in range(count):
+                seg_features_dc.append(features_dc)
+                seg_features_rest.append(features_extra)
+                seg_opacities.append(opacities)
+                seg_xyz.append(big_m)
+                seg_scales.append(big_s)
+                seg_rots.append(big_r)
+                seg_segs.append(i)
+
+
+        self._xyz = nn.Parameter(torch.tensor(seg_xyz, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._features_dc = (torch.tensor(seg_features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(False))
+        self._features_rest = (torch.tensor(seg_features_rest, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(False))
+        self._opacity = (torch.tensor(seg_opacities, dtype=torch.float, device="cuda").requires_grad_(False))
+        self._scaling = nn.Parameter(torch.tensor(seg_scales, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._rotation = nn.Parameter(torch.tensor(seg_rots, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._segments = seg_segs
+
+        self.active_sh_degree = self.max_sh_degree
+
+
+    
+    def parameterize_segments(self):
+        ''' Parameterize segment gaussian with respect to the big gaussians'''
+
+        '''print(f"means: {self._xyz.data[:2]}")
+        print(f"rotations: {self._rotation.data[:2]}")
+        print(f"scales: {self._scaling.data[:2]}")'''
+        
+        segment_Ms = self._xyz.data.cpu().numpy()
+        segment_Rs = GaussianModel.get_matrix_from_quat(self._rotation.data).cpu().numpy()
+        segment_Ss = np.exp(self._scaling.data.cpu().numpy())
+
+        '''print(f"big pre means: {segment_Ms[:2]}")
+        print(f"big pre rotations: {segment_Rs[:2]}")
+        print(f"big pre scales: {segment_Ss[:2]}")'''
+
+        self._original_segment_R = torch.tensor(segment_Rs, dtype=torch.float, device="cuda")
+
+        param_dictionaries = [None] * self.no_prototypes
+
+        for i in range(self._xyz.shape[0]):
+            segment_i = self._segments[i]
+
+            if param_dictionaries[segment_i] is not None:
+                continue
+
+            segment_M = segment_Ms[i]
+            segment_R = segment_Rs[i]
+            segment_S = segment_Ss[i]
+            #proto_R = self._proto_dict[segment_i]["rotation"]
+
+            '''small_M = (self._proto_dict[segment_i]["xyz"] - segment_M) #@ segment_R #/ segment_S
+
+            small_R = self._proto_dict[segment_i]["rotation"] #segment_R.T @ proto_R @ segment_R # 
+
+            small_S = self._proto_dict[segment_i]["scaling"] # np.exp(self._proto_scaling[i]) / segment_S'''
+
+            proto_rotation_activated = self.rotation_activation(self._proto_dict[segment_i]["rotation"])
+        
+            small_Ms = (self._proto_dict[segment_i]["xyz"] - segment_M)
+
+            small_Ms = self.rotate_points_by_quaternion(
+                small_Ms / segmentS,
+                self.quaternion_inverse(segment_R)
+            )
+            
+            q_xyz = segment_R
+            R = self.quaternion_to_rotation_matrix(q_xyz)
+            euler_zyx = self.rotation_matrix_to_euler_zyx(R)
+            q_zyx = self.euler_zyx_to_quaternion(euler_zyx)
+
+            small_Rs = self.compose_quaternions(
+                self.quaternion_inverse(q_zyx),
+                proto_rotation_activated
+            )
+
+            small_Ss = np.exp(self.self._proto_scaling[i]) / segment_S
+
+            '''
+            smallMeans_shifted = smallMeans - mean
+            A_m = smallMeans_shifted @ R_big / S_big
+            A_R = R_big.T @ smallR @ R_big 
+            A_S = smallS / S_big
+            '''
+
+            param_dictionaries[segment_i] = {
+                "xyz": np.array(small_M),
+                "rotation": np.array(small_R),
+                "scaling": np.array(small_S),
+                "features_dc": np.array(self._proto_dict[segment_i]["features_dc"]),
+                "features_rest": np.array(self._proto_dict[segment_i]["features_rest"]),
+                "opacity": np.array(self._proto_dict[segment_i]["opacity"]),
+            }
+
+        self._param_dict = param_dictionaries
+
+        # initilize _xyz to random noise
+        self._xyz = nn.Parameter(0.01 * torch.randn_like(self._xyz).requires_grad_(True))
+
+        '''print(f"param means: {self._param_dict[0]['xyz'][:2]}")
+        print(f"param segment: {segment_Ms[0]}")
+        print(f"param rotations: {small_Rs[:2]}")
+        print(f"param scales: {small_Ss[:2]}")'''
+
+
+
+    def deparameterize_segments(self, xyz):
+        ''' Deparameterize segment gaussians with respect to the big gaussians
+        return means, scales, quaternions'''
+        
+        segment_Ms = xyz
+        segment_Rs = GaussianModel.get_matrix_from_quat(self._rotation.data)
+        segment_Ss = torch.exp(self._scaling)  #np.exp(self._scaling.data.cpu().numpy())
+
+        '''print(f"big post means: {segment_Ms[:2]}")
+        print(f"big post rotations: {segment_Rs[:2]}")
+        print(f"big post scales: {segment_Ss[:2]}")'''
+
+        deparam_quats = []
+        deparam_scales = []
+        deparam_means = []
+        deparam_features_dc = []
+        deparam_features_rest = []
+        deparam_opacities = []
+
+        '''print(f"deparam begin means: {self._param_proto_xyz[:2]}")
+        print(f"deparam begin rotations: {self._param_proto_rotation[:2]}")
+        print(f"deparam begin scales: {self._param_proto_scaling[:2]}")'''
+
+        for i in range(segment_Ms.shape[0]):
+
+            segment_i = self._segments[i]
+
+            small_xyz = torch.tensor(self._param_dict[segment_i]["xyz"], dtype=torch.float, device="cuda")
+            small_rot = torch.tensor(self._param_dict[segment_i]["rotation"], dtype=torch.float, device="cuda")
+            small_scale = torch.tensor(self._param_dict[segment_i]["scaling"], dtype=torch.float, device="cuda")
+            small_f_dc = torch.tensor(self._param_dict[segment_i]["features_dc"], dtype=torch.float, device="cuda")
+            small_f_rest = torch.tensor(self._param_dict[segment_i]["features_rest"], dtype=torch.float, device="cuda")
+            small_f_opacity = torch.tensor(self._param_dict[segment_i]["opacity"], dtype=torch.float, device="cuda")
+
+            #print(f"small_xyz: {small_xyz.shape}, small_rot: {small_rot.shape}, small_scale: {small_scale.shape}")
+
+            segment_M = segment_Ms[i]
+            segment_R = segment_Rs[i]
+            segment_S = segment_Ss[i]
+
+            '''small_M = small_xyz + segment_M # + (small_xyz * segment_S) #@ segment_R.T
+            small_R = small_rot #self._original_segment_R[i] @ small_rot @ segment_R.T
+            small_S = small_scale #* segment_S'''
+
+            small_M = segment_M + self.rotate_points_by_quaternion(
+                small_xyz * segment_S,
+                segment_R
+            )
+
+            q_xyz = segment_R
+            R = self.quaternion_to_rotation_matrix(q_xyz)
+            euler_zyx = self.rotation_matrix_to_euler_zyx(R)
+            q_zyx = self.euler_zyx_to_quaternion(euler_zyx)
+
+            small_R = self.compose_quaternions(
+                q_zyx,
+                small_rot
+            )
+
+            deparam_scales = segment_S * small_scale
+
+            '''
+            A_m_new = mean_shift + (A_m * S_scale) @ R_rot.T
+            A_R_new = R_big @ A_R @ R_rot.T
+            A_S_new = A_S * S_scale
+            '''
+            
+            small_S_log = torch.log(deparam_scales)
+
+
+            deparam_quats.append(small_R)
+            deparam_scales.append(small_S_log)
+            deparam_means.append(small_M)
+            deparam_features_dc.append(small_f_dc)
+            deparam_features_rest.append(small_f_rest)
+            deparam_opacities.append(small_f_opacity)
+
+
+        #print(f"deparam_features_dc: {deparam_features_dc.shape}, deparam_features_rest: {deparam_features_rest.shape}, features_dx {self._features_dc.shape}, features_rest {self._features_rest.shape}")
+        '''quats = deparam_quats #torch.tensor(deparam_quats, dtype=torch.float, device="cuda")
+        scales = deparam_scales #torch.tensor(deparam_scales, dtype=torch.float, device="cuda")
+        means = deparam_means #torch.tensor(deparam_means, dtype=torch.float, device="cuda")
+        opacity = deparam_opacities #torch.tensor(deparam_opacities, dtype=torch.float, device="cuda")
+        features_dc = deparam_features_dc.transpose(1, 2).contiguous() #torch.tensor(deparam_features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous()
+        features_rest = deparam_features_rest.transpose(1, 2).contiguous() #torch.tensor(deparam_features_rest, dtype=torch.float, device="cuda").transpose(1, 2).contiguous()
+        features = torch.cat((features_dc, features_rest), dim=1) '''
+
+        quats = torch.cat(deparam_quats, axis=0)
+        scales = torch.cat(deparam_scales, axis=0)
+        means = torch.cat(deparam_means, axis=0)
+        features_dc = torch.cat(deparam_features_dc, axis=0).transpose(1, 2).contiguous()
+        features_rest = torch.cat(deparam_features_rest, axis=0).transpose(1, 2).contiguous()
+        features = torch.cat((features_dc, features_rest), dim=1)
+        opacity = torch.cat(deparam_opacities, axis=0)
+
+        return means, scales, quats, opacity, features, features_dc, features_rest
+
+    def rotate_points_by_quaternion(self, points, quaternions):
+        norm_quaternions = quaternions.norm(dim=-1, keepdim=True)
+        quaternions = quaternions / norm_quaternions
+        q_vec = quaternions[..., 1:]
+
+        uv = torch.cross(q_vec, points, dim=-1)  # u = q.xyz x v
+        uuv = torch.cross(q_vec, uv, dim=-1)     # uu = q.xyz x u
+        rotated = points + 2 * (quaternions[..., :1] * uv + uuv)  # v' = v + 2(w * u + uu)
+        return rotated
+    
+    def compose_quaternions(self, q1, q2):
+        w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
+        w2, x2, y2, z2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
+
+        w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+        x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+        y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+        z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+
+        return torch.stack([w, x, y, z], dim=-1)
+
+    def quaternion_inverse(self, quaternion):
+        w, x, y, z = quaternion[..., 0], quaternion[..., 1], quaternion[..., 2], quaternion[..., 3]
+        norm_sq = quaternion.norm(dim=-1, keepdim=True) ** 2
+        return torch.stack([w, -x, -y, -z], dim=-1) / norm_sq
+    
+    def quaternion_to_rotation_matrix(self, q):
+        w, x, y, z = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
+
+        R = torch.zeros(q.shape[:-1] + (3, 3), device=q.device)
+        R[..., 0, 0] = 1 - 2 * (y**2 + z**2)
+        R[..., 0, 1] = 2 * (x * y - z * w)
+        R[..., 0, 2] = 2 * (x * z + y * w)
+        R[..., 1, 0] = 2 * (x * y + z * w)
+        R[..., 1, 1] = 1 - 2 * (x**2 + z**2)
+        R[..., 1, 2] = 2 * (y * z - x * w)
+        R[..., 2, 0] = 2 * (x * z - y * w)
+        R[..., 2, 1] = 2 * (y * z + x * w)
+        R[..., 2, 2] = 1 - 2 * (x**2 + y**2)
+
+        return R
+
+    def rotation_matrix_to_euler_zyx(self, R):
+        sy = torch.sqrt(R[..., 0, 0]**2 + R[..., 1, 0]**2)
+        singular = sy < 1e-6
+
+        # Yaw, pitch, roll
+        yaw = torch.where(singular, torch.atan2(-R[..., 1, 2], R[..., 1, 1]), torch.atan2(R[..., 1, 0], R[..., 0, 0]))
+        pitch = torch.where(singular, torch.atan2(-R[..., 2, 0], sy), torch.atan2(-R[..., 2, 0], sy))
+        roll = torch.where(singular, torch.zeros_like(yaw), torch.atan2(R[..., 2, 1], R[..., 2, 2]))
+
+        return torch.stack((yaw, pitch, roll), dim=-1)
+
+    def euler_zyx_to_quaternion(self, euler):
+        yaw, pitch, roll = euler[..., 0], euler[..., 1], euler[..., 2]
+
+        cy, sy = torch.cos(yaw / 2), torch.sin(yaw / 2)
+        cp, sp = torch.cos(pitch / 2), torch.sin(pitch / 2)
+        cr, sr = torch.cos(roll / 2), torch.sin(roll / 2)
+
+        w = cr * cp * cy + sr * sp * sy
+        x = sr * cp * cy - cr * sp * sy
+        y = cr * sp * cy + sr * cp * sy
+        z = cr * cp * sy - sr * sp * cy
+
+        return torch.stack((w, x, y, z), dim=-1)
+
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
