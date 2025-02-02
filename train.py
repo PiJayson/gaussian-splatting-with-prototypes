@@ -54,7 +54,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians.load_prototypes(segment_paths, segment_counts)
 
     # Parameterize segments using the big Gaussians
+    print("Parametrization")
     gaussians.parameterize_segments()
+
+    # Set position and rotation to random values around 0
+    gaussians._xyz.data = torch.randn_like(gaussians._xyz.data) * 0.05
 
     batch_size = args.batch_size
 
@@ -132,7 +136,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         batch_loss = 0.0
 
         # deparameterize segments
-        means, scales, quats, opacity, features, features_dc, features_rest = gaussians.deparameterize_segments(gaussians._xyz)
+        means, scales, quats, opacity, features, features_dc, features_rest = gaussians.deparameterize_segments()
 
         deparam_pack = (means, scales, quats, opacity, features, features_dc, features_rest)
 
