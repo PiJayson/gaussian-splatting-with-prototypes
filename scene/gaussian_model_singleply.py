@@ -243,7 +243,7 @@ class GaussianModel:
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
 
-        xyz, scale, rotation, opacities, features, f_dc, f_rest = self.deparameterize_segments(self._xyz)
+        xyz, scale, rotation, opacities, features, f_dc, f_rest = self.deparameterize_segments()
 
         print(f"Saving {xyz.shape[0]} points to {path}")
 
