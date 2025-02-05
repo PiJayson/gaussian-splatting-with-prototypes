@@ -62,10 +62,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     batch_size = args.batch_size
 
-    # test
-    gaussians.save_ply("/home/z1181521/gaussian-splatting/test.ply")
-    gaussians.save_compressed_ply("/home/z1181521/gaussian-splatting/test_compressed.ply")
-
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
@@ -154,8 +150,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # save images
             if iteration < 10:
-                plt.imsave(f"/home/z1181521/gaussian-splatting/img/{iteration}_gt.png", gt_image.permute(1, 2, 0).detach().cpu().numpy())
-                plt.imsave(f"/home/z1181521/gaussian-splatting/img/{iteration}_render.png", image.permute(1, 2, 0).detach().cpu().numpy())
+                plt.imsave(f"./img/{iteration}_gt.png", gt_image.permute(1, 2, 0).detach().cpu().numpy())
+                plt.imsave(f"./img/{iteration}_render.png", image.permute(1, 2, 0).detach().cpu().numpy())
+
+            if iteration > 10 and iteration % 100 == 0:
+                plt.imsave(f"./img/{iteration}_gt.png", gt_image.permute(1, 2, 0).detach().cpu().numpy())
+                plt.imsave(f"./img/{iteration}_render.png", image.permute(1, 2, 0).detach().cpu().numpy())
 
             if viewpoint_cam.alpha_mask is not None:
                 alpha_mask = viewpoint_cam.alpha_mask.cuda()
