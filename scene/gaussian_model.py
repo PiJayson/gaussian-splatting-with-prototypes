@@ -512,15 +512,16 @@ class GaussianModel:
     def parameterize_segments(self):
         segment_Ms = self._xyz.data
         segment_Rs = self.rotation_activation(self._rotation).detach()
-        # segment_Ss = torch.exp(self._scaling.data)
-        # segment_Ss = torch.clamp(segment_Ss, min=1e-6)
+        segment_Ss = self._scaling.data
+        exp_segment_Ss = torch.exp(segment_Ss)
+        exp_segment_Ss = torch.clamp(exp_segment_Ss, min=1e-6)
         
         # Normalization
         proto_rotation_activated = self.rotation_activation(self._proto_rotation)
         
         small_Ms = (self._proto_xyz - segment_Ms[self._proto_segments])
         small_Ms = self.rotate_points_by_quaternion(
-            small_Ms, # / segment_Ss[self._proto_segments],
+            small_Ms / segment_Ss[self._proto_segments],
             self.quaternion_inverse(segment_Rs[self._proto_segments])
         )
         
@@ -534,25 +535,26 @@ class GaussianModel:
             proto_rotation_activated
         )
         
-        # small_Ss = self._proto_scaling - segment_Ss[self._proto_segments]
-
+        small_Ss = self._proto_scaling - segment_Ss[self._proto_segments]
+        
         self._param_proto_xyz = small_Ms
         self._param_proto_rotation = small_Rs
-        # self._param_proto_scaling = small_Ss
+        self._param_proto_scaling = small_Ss
 
     def deparameterize_segments(self):
         # Extract segment data
         segment_Ms = self._xyz
         segment_Rs = self.rotation_activation(self._rotation)
-        # segment_Ss = torch.exp(self._scaling.data)
-        # segment_Ss = torch.clamp(segment_Ss, min=1e-6)  # Prevent division by zero
-
+        segment_Ss = self._scaling
+        exp_segment_Ss = torch.exp(segment_Ss)
+        exp_segment_Ss = torch.clamp(exp_segment_Ss, min=1e-6)
+        
         # Deparameterize means
         deparam_means = segment_Ms[self._proto_segments] + self.rotate_points_by_quaternion(
-            self._param_proto_xyz, # * segment_Ss[self._proto_segments],
+            self._param_proto_xyz * exp_segment_Ss[self._proto_segments],
             segment_Rs[self._proto_segments]
         )
-
+        
         # Deparameterize rotations
         q_xyz = segment_Rs[self._proto_segments]
         R = self.quaternion_to_rotation_matrix(q_xyz)
@@ -565,14 +567,14 @@ class GaussianModel:
         )
 
         # Deparameterize scales
-        # deparam_scales = self._param_proto_scaling + segment_Ss[self._proto_segments]
+        deparam_scales = self._param_proto_scaling + segment_Ss[self._proto_segments]
 
         # Combine features
         deparam_features_dc = self._proto_features_dc.transpose(1, 2)
         deparam_features_rest = self._proto_features_rest.transpose(1, 2)
         deparam_features = torch.cat((deparam_features_dc, deparam_features_rest), dim=1)
 
-        return deparam_means, self._proto_scaling, deparam_rotations, self._proto_opacity, deparam_features, deparam_features_dc, deparam_features_rest
+        return deparam_means, deparam_scales, deparam_rotations, self._proto_opacity, deparam_features, deparam_features_dc, deparam_features_rest
 
 
     def quat_from_matrix(rot_matrix):
