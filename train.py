@@ -59,11 +59,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     # Set position and rotation to random values around 0
     if position_noise > 0:
-        gaussians._xyz.data = torch.randn_like(gaussians._xyz.data) * position_noise
+        gaussians._xyz = torch.nn.Parameter(
+            (gaussians._xyz + torch.randn_like(gaussians._xyz) * position_noise)
+        )
     if rotation_noise > 0:
-        gaussians._rotation = torch.randn_like(gaussians._rotation.data) * rotation_noise
+        gaussians._rotation = torch.nn.Parameter(
+            (gaussians._rotation + torch.randn_like(gaussians._rotation) * rotation_noise).requires_grad_(True)
+        )
     if scale_noise > 0:
-        gaussians._scale = torch.randn_like(gaussians._scale.data) * scale_noise
+        gaussians._scaling = torch.nn.Parameter(
+            (gaussians._scaling + torch.randn_like(gaussians._scaling) * scale_noise)
+        )
 
     batch_size = args.batch_size
 
@@ -162,9 +168,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 plt.imsave(f"./img/{iteration}_gt.png", gt_image.permute(1, 2, 0).detach().cpu().numpy())
                 plt.imsave(f"./img/{iteration}_render.png", image.permute(1, 2, 0).detach().cpu().numpy())
 
-            if viewpoint_cam.alpha_mask is not None:
-                alpha_mask = viewpoint_cam.alpha_mask.cuda()
-                image *= alpha_mask
+            # if viewpoint_cam.alpha_mask is not None:
+            #     alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            #     image *= alpha_mask
 
             # Loss
             Ll1 = l1_loss(image, gt_image)
@@ -202,6 +208,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         loss = batch_loss / batch_size
         loss.backward()
+        
+        gaussians._rotation.data = gaussians.rotation_activation(gaussians._rotation)
+
 
         # Gradient debugging
         #print(f"Gradient {gaussians._xyz.grad}")

@@ -6,7 +6,7 @@ LOCAL_IMG_DIR="./img"
 
 # Step 0: Clean img folder
 echo "Cleaning img folder"
-rm -rf "$LOCAL_IMG_DIR/*"
+rm -rf "$LOCAL_IMG_DIR"/*
 ssh "$SERVER" "cd $REMOTE_DIR && rm -rf img/"
 ssh "$SERVER" "cd $REMOTE_DIR/output && rm -rf *"
 

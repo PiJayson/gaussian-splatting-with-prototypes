@@ -528,9 +528,6 @@ class GaussianModel:
         
         if self.param_position:
             small_Ms = (self._proto_xyz - segment_Ms[self._proto_segments])
-        if self.param_scale:
-            small_Ms = small_Ms / exp_segment_Ss[self._proto_segments]
-            small_Ss = self._proto_scaling - segment_Ss[self._proto_segments]
         if self.param_rotation:
             small_Ms = self.rotate_points_by_quaternion(
                 small_Ms,
@@ -546,6 +543,9 @@ class GaussianModel:
                 self.quaternion_inverse(q_zyx),
                 proto_rotation_activated
             )
+        if self.param_scale:
+            small_Ms = small_Ms / exp_segment_Ss[self._proto_segments]
+            small_Ss = self._proto_scaling - segment_Ss[self._proto_segments]
         
         self._param_proto_xyz = small_Ms
         self._param_proto_rotation = small_Rs
