@@ -41,7 +41,7 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, segment_paths, segment_counts, batch_size):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, segment_paths, segment_counts, batch_size, position_noise, rotation_noise, scale_noise):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
@@ -58,13 +58,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians.parameterize_segments()
 
     # Set position and rotation to random values around 0
-    gaussians._xyz.data = torch.randn_like(gaussians._xyz.data) * 0.05
+    if position_noise > 0:
+        gaussians._xyz = torch.nn.Parameter(
+            (gaussians._xyz + torch.randn_like(gaussians._xyz) * position_noise)
+        )
+    if rotation_noise > 0:
+        gaussians._rotation = torch.nn.Parameter(
+            (gaussians._rotation + torch.randn_like(gaussians._rotation) * rotation_noise).requires_grad_(True)
+        )
+    if scale_noise > 0:
+        gaussians._scaling = torch.nn.Parameter(
+            (gaussians._scaling + torch.randn_like(gaussians._scaling) * scale_noise)
+        )
 
     batch_size = args.batch_size
-
-    # test
-    gaussians.save_ply("/home/z1181521/gaussian-splatting/test.ply")
-    gaussians.save_compressed_ply("/home/z1181521/gaussian-splatting/test_compressed.ply")
 
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
@@ -154,12 +161,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # save images
             if iteration < 10:
-                plt.imsave(f"/home/z1181521/gaussian-splatting/img/{iteration}_gt.png", gt_image.permute(1, 2, 0).detach().cpu().numpy())
-                plt.imsave(f"/home/z1181521/gaussian-splatting/img/{iteration}_render.png", image.permute(1, 2, 0).detach().cpu().numpy())
+                plt.imsave(f"./img/{iteration}_gt.png", gt_image.permute(1, 2, 0).detach().cpu().numpy())
+                plt.imsave(f"./img/{iteration}_render.png", image.permute(1, 2, 0).detach().cpu().numpy())
 
-            if viewpoint_cam.alpha_mask is not None:
-                alpha_mask = viewpoint_cam.alpha_mask.cuda()
-                image *= alpha_mask
+            if iteration > 10 and iteration % 100 == 0:
+                plt.imsave(f"./img/{iteration}_gt.png", gt_image.permute(1, 2, 0).detach().cpu().numpy())
+                plt.imsave(f"./img/{iteration}_render.png", image.permute(1, 2, 0).detach().cpu().numpy())
+
+            # if viewpoint_cam.alpha_mask is not None:
+            #     alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            #     image *= alpha_mask
 
             # Loss
             Ll1 = l1_loss(image, gt_image)
@@ -197,6 +208,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         loss = batch_loss / batch_size
         loss.backward()
+        
+        gaussians._rotation.data = gaussians.rotation_activation(gaussians._rotation)
+
 
         # Gradient debugging
         #print(f"Gradient {gaussians._xyz.grad}")
@@ -330,6 +344,10 @@ if __name__ == "__main__":
     parser.add_argument("--segment_paths",  nargs="+", type=str)
     parser.add_argument("--segment_counts",  nargs="+", type=int)
     parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--position_noise", type=float, default=0.0)
+    parser.add_argument("--rotation_noise", type=float, default=0.0)
+    parser.add_argument("--scale_noise", type=float, default=0.0)
+    
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -345,7 +363,7 @@ if __name__ == "__main__":
     if not args.disable_viewer:
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.segment_paths, args.segment_counts, args.batch_size)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.segment_paths, args.segment_counts, args.batch_size, args.position_noise, args.rotation_noise, args.scale_noise)
 
     # All done
     print("\nTraining complete.")
