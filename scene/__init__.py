@@ -16,13 +16,14 @@ from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
+from utils.graphics_utils import BasicPointCloud
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 
 class Scene:
 
     gaussians : GaussianModel
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0]):
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0], gs_number=0):
         """b
         :param path: Path to colmap scene main folder.
         """
@@ -80,7 +81,15 @@ class Scene:
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"), args.train_test_exp)
         else:
-            self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent)
+            if gs_number > 0:
+                selected_points = scene_info.point_cloud.points[:min(gs_number, len(scene_info.point_cloud.points))]
+                selected_colors = scene_info.point_cloud.colors[:min(gs_number, len(scene_info.point_cloud.colors))]
+                selected_normals = scene_info.point_cloud.normals[:min(gs_number, len(scene_info.point_cloud.normals))]
+                limited_point_cloud = BasicPointCloud(selected_points, selected_colors, selected_normals)
+                
+                self.gaussians.create_from_pcd(limited_point_cloud, scene_info.train_cameras, self.cameras_extent)
+            else:
+                self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent)
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
