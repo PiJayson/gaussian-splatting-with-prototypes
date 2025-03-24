@@ -49,6 +49,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
+    gaussians.param_setup(opt)
 
     # Load prototypes into the model
     gaussians.load_prototypes(segment_paths, segment_counts)
