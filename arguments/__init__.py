@@ -101,6 +101,7 @@ class OptimizationParams(ParamGroup):
         self.param_scale = 1
         self.init_blur = 0.0
         self.blur_kernel = 15
+        self.uniform_scale = 0
         self.optimizer_type = "default"
         super().__init__(parser, "Optimization Parameters")
 

@@ -70,6 +70,7 @@ class GaussianModel:
         self.param_position = True
         self.param_rotation = True
         self.param_scale = True
+        self.uniform_scale = False
         self.setup_functions()
 
     def capture(self):
@@ -182,14 +183,16 @@ class GaussianModel:
         exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
         self._exposure = nn.Parameter(exposure.requires_grad_(True))
 
+    def param_setup(self, training_args):
+        self.param_position = training_args.param_position
+        self.param_rotation = training_args.param_rotation
+        self.param_scale = training_args.param_scale
+        self.uniform_scale = training_args.uniform_scale
+
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        
-        self.param_position = training_args.param_position
-        self.param_rotation = training_args.param_rotation
-        self.param_scale = training_args.param_scale
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
@@ -525,6 +528,9 @@ class GaussianModel:
         
         # Normalization
         proto_rotation_activated = self.rotation_activation(self._proto_rotation)
+        small_Ms = self._proto_xyz
+        small_Rs = self._proto_rotation
+        small_Ss = self._proto_scaling
         
         if self.param_position:
             small_Ms = (self._proto_xyz - segment_Ms[self._proto_segments])
@@ -544,8 +550,12 @@ class GaussianModel:
                 proto_rotation_activated
             )
         if self.param_scale:
-            small_Ms = small_Ms / exp_segment_Ss[self._proto_segments]
-            small_Ss = self._proto_scaling - segment_Ss[self._proto_segments]
+            if self.uniform_scale:
+                small_Ms = small_Ms / exp_segment_Ss[self._proto_segments][..., 0:1].detach()
+                small_Ss = self._proto_scaling - segment_Ss[self._proto_segments][..., 0:1].detach()
+            else:
+                small_Ms = small_Ms / exp_segment_Ss[self._proto_segments]
+                small_Ss = self._proto_scaling - segment_Ss[self._proto_segments]
         
         self._param_proto_xyz = small_Ms
         self._param_proto_rotation = small_Rs
@@ -564,8 +574,12 @@ class GaussianModel:
         deparam_scales = self._param_proto_scaling
         
         if self.param_scale:
-            deparam_means = self._param_proto_xyz * exp_segment_Ss[self._proto_segments]
-            deparam_scales = self._param_proto_scaling + segment_Ss[self._proto_segments]
+            if self.uniform_scale:
+                deparam_means = self._param_proto_xyz * exp_segment_Ss[self._proto_segments][..., 0:1]
+                deparam_scales = self._param_proto_scaling + segment_Ss[self._proto_segments][..., 0:1]
+            else:
+                deparam_means = self._param_proto_xyz * exp_segment_Ss[self._proto_segments]
+                deparam_scales = self._param_proto_scaling + segment_Ss[self._proto_segments]
         if self.param_rotation:
             deparam_means = self.rotate_points_by_quaternion(
                 deparam_means,
