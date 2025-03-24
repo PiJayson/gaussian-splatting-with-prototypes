@@ -172,7 +172,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # gaussian blur the ground truth image
             if curr_blur > 0:
                 gt_image = torchvision.transforms.GaussianBlur(kernel_size=opt.blur_kernel, sigma=curr_blur)(gt_image)
-                curr_blur -= blur_step
 
             # save images
             if iteration < 10:
