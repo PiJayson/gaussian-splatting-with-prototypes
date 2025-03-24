@@ -25,8 +25,9 @@ python train.py -s /shared/sets/datasets/nerf_synthetic/materials \
         --scaling_lr 0.003 \
         --batch_size 5 \
         --param_position 0 \
-        --param_scale 1 \
         --param_rotation 1 \
+        --param_scale 0 \
         --position_noise 0 \
-        --rotation_noise 1 \
-        --scale_noise 0.5
+        --rotation_noise 0.5 \
+        --scale_noise 0.7 \
+        --uniform_scale 0
