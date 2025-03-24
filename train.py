@@ -153,6 +153,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         deparam_pack = (means, scales, quats, opacity, features, features_dc, features_rest)
 
+        #decresing blur
+        if curr_blur > 0:
+            curr_blur -= blur_step
+
         for i, viewpoint_cam in enumerate(viewpoint_batch):
 
             bg = torch.rand((3), device="cuda") if opt.random_background else background
