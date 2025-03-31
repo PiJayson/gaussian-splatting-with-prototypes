@@ -61,6 +61,13 @@ def get_expon_lr_func(
 
     return helper
 
+def linear_scheduler(lr_init, lr_final, max_steps):
+    def scheduler(step):
+        t = np.clip(step / max_steps, 0, 1)
+        return lr_init * (1 - t) + lr_final * t
+    return scheduler
+
+
 def strip_lowerdiag(L):
     uncertainty = torch.zeros((L.shape[0], 6), dtype=torch.float, device="cuda")
 

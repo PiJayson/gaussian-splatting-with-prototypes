@@ -11,7 +11,7 @@
 
 import torch
 import numpy as np
-from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
+from utils.general_utils import inverse_sigmoid, get_expon_lr_func, linear_scheduler, build_rotation
 from torch import nn
 import os
 import json
@@ -72,6 +72,11 @@ class GaussianModel:
         self.param_scale = True
         self.uniform_scale = False
         self.setup_functions()
+        self._delta_features_dc = torch.empty(0)
+        self._delta_features_rest = torch.empty(0)
+        self._delta_opacity = torch.empty(0)
+        self.delta_color = 1.0
+        self.delta_opacity = 1.0
 
     def capture(self):
         return (
@@ -200,7 +205,10 @@ class GaussianModel:
             {'params': [self._features_rest], 'lr': 0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': 0, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
+            {'params': [self._delta_features_dc], 'lr': training_args.color_lr_init, "name": "delta_f_dc"},
+            {'params': [self._delta_features_rest], 'lr': training_args.color_lr_init, "name": "delta_f_rest"},
+            {'params': [self._delta_opacity], 'lr': training_args.opacity_delta_lr, "name": "delta_opacity"}
         ]
 
         if self.optimizer_type == "default":
@@ -223,6 +231,9 @@ class GaussianModel:
                                                         lr_delay_steps=training_args.exposure_lr_delay_steps,
                                                         lr_delay_mult=training_args.exposure_lr_delay_mult,
                                                         max_steps=training_args.iterations)
+        
+        self.delta_color_scheduler = linear_scheduler(lr_init=1.0, lr_final=0.0, max_steps=training_args.iterations)
+        self.delta_opacity_scheduler = linear_scheduler(lr_init=1.0, lr_final=0.0, max_steps=training_args.iterations)
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -234,6 +245,9 @@ class GaussianModel:
             if param_group["name"] == "xyz":
                 lr = self.xyz_scheduler_args(iteration)
                 param_group['lr'] = lr
+                
+                self.delta_color = self.delta_color_scheduler(iteration)
+                self.delta_opacity = self.delta_opacity_scheduler(iteration)
                 return lr
 
     def construct_list_of_attributes(self):
@@ -514,6 +528,12 @@ class GaussianModel:
         self._scaling = nn.Parameter(torch.tensor(np.array(seg_scales), dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(np.array(seg_rots), dtype=torch.float, device="cuda").requires_grad_(True))
         self._segments = seg_segs
+        
+        # Learnable prototype feautres
+        self._delta_features_dc = nn.Parameter(torch.zeros_like(self._proto_features_dc))
+        self._delta_features_rest = nn.Parameter(torch.zeros_like(self._proto_features_rest))
+        self._delta_opacity = nn.Parameter(torch.zeros_like(self._proto_opacity))
+
 
         self.active_sh_degree = self.max_sh_degree
 
@@ -598,11 +618,14 @@ class GaussianModel:
             deparam_means = deparam_means + segment_Ms[self._proto_segments]
 
         # Combine features
-        deparam_features_dc = self._proto_features_dc.transpose(1, 2)
-        deparam_features_rest = self._proto_features_rest.transpose(1, 2)
-        deparam_features = torch.cat((deparam_features_dc, deparam_features_rest), dim=1)
+        base_features_dc = self._proto_features_dc.transpose(1, 2)
+        base_features_rest = self._proto_features_rest.transpose(1, 2)
+        effective_features_dc = base_features_dc + self.delta_color * self._delta_features_dc.transpose(1,2)
+        effective_features_rest = base_features_rest + self.delta_color * self._delta_features_rest.transpose(1,2)
+        deparam_features = torch.cat((effective_features_dc, effective_features_rest), dim=1)
+        effective_opacity = self._proto_opacity + self.delta_opacity * self._delta_opacity
 
-        return deparam_means, deparam_scales, deparam_rotations, self._proto_opacity, deparam_features, deparam_features_dc, deparam_features_rest
+        return deparam_means, deparam_scales, deparam_rotations, effective_opacity, deparam_features, effective_features_dc, effective_features_rest
 
 
     def quat_from_matrix(rot_matrix):

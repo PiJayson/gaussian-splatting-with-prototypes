@@ -23,6 +23,8 @@ python train.py -s /shared/sets/datasets/nerf_synthetic/materials \
         --position_lr_max_steps 4000 \
         --rotation_lr 0.5 \
         --scaling_lr 0.003 \
+        --color_lr_init 0.05 \
+        --opacity_delta_lr 0.05 \
         --batch_size 5 \
         --param_position 0 \
         --param_rotation 1 \
