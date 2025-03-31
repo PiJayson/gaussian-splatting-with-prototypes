@@ -210,7 +210,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss = batch_loss / batch_size
         loss.backward()
         
-        gaussians._rotation.data = gaussians.rotation_activation(gaussians._rotation)
+        with torch.no_grad():
+            gaussians._rotation.data = gaussians.rotation_activation(gaussians._rotation)
+            gaussians._delta_features_dc.data.clamp_(-1, 1)
+            gaussians._delta_features_rest.data.clamp_(-1, 1)
+            gaussians._delta_opacity.data.clamp_(-10, 10)
 
 
         # Gradient debugging
