@@ -7,10 +7,12 @@
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
+
 #
 
 import os
 import torch
+import torchvision
 from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
@@ -94,6 +96,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
 
+    # Gaussian blur calculation
+    curr_blur = opt.init_blur
+    blur_step = curr_blur / opt.iterations
+
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
@@ -148,6 +154,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         deparam_pack = (means, scales, quats, opacity, features, features_dc, features_rest)
 
+        #decresing blur
+        if curr_blur > 0:
+            curr_blur -= blur_step
+
         for i, viewpoint_cam in enumerate(viewpoint_batch):
 
             bg = torch.rand((3), device="cuda") if opt.random_background else background
@@ -159,6 +169,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # get ground truth image
             gt_image = viewpoint_cam.original_image.cuda()
+
+            # gaussian blur the ground truth image
+            if curr_blur > 0:
+                gt_image = torchvision.transforms.GaussianBlur(kernel_size=opt.blur_kernel, sigma=curr_blur)(gt_image)
 
             # save images
             if iteration < 10:
@@ -188,7 +202,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             image_mask = (image.mean(dim=0) > threshold).float()
             gt_image_mask = (gt_image.mean(dim=0) > threshold).float()
             bse_loss = bce_loss(image_mask, gt_image_mask)
-            loss += 0.001 * bse_loss # disabled
+            # loss += 0.001 * bse_loss # disabled
 
 
             # Depth regularization
@@ -215,7 +229,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             gaussians._delta_features_dc.data.clamp_(-1, 1)
             gaussians._delta_features_rest.data.clamp_(-1, 1)
             gaussians._delta_opacity.data.clamp_(-10, 10)
-
 
         # Gradient debugging
         #print(f"Gradient {gaussians._xyz.grad}")
